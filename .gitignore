@@ -1,0 +1,16 @@
+# Binaries
+/veloce
+/cmd/veloce/veloce
+*.exe
+*.test
+*.out
+
+# Go build/test artifacts
+/dist/
+coverage.txt
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
