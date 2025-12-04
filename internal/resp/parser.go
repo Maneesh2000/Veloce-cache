@@ -60,3 +60,90 @@ func (p *Parser) Buffered() int { return len(p.buf) - p.pos }
 // Next returns the next complete command, or (nil, nil) if the buffer does
 // not yet hold one. A ProtocolError is fatal: the caller should send it to
 // the client and close the connection (parser state is not recoverable).
+func (p *Parser) Next() ([][]byte, error) {
+	for {
+		if p.multibulklen == 0 {
+			// Between commands: expect a "*<count>" header or an inline command.
+			line, ok, err := p.readLine()
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				p.compact()
+				return nil, nil
+			}
+			if len(line) == 0 {
+				continue // bare CRLF between commands: ignored, like Redis
+			}
+			if line[0] != '*' {
+				// Inline protocol: space-separated words on one line.
+				args := splitInline(line)
+				if len(args) == 0 {
+					continue
+				}
+				p.compact()
+				return args, nil
+			}
+			n, perr := parseLen(line[1:])
+			if perr != nil || n > MaxMultibulk {
+				return nil, ProtocolError("invalid multibulk length")
+			}
+			if n <= 0 {
+				continue // "*0" and "*-1" carry no command; skip
+			}
+			p.multibulklen = n
+			p.bulklen = -1
+			p.args = make([][]byte, 0, n)
+		}
+
+		// Inside a multibulk: decode the remaining "$<len>\r\n<payload>\r\n" elements.
+		for p.multibulklen > 0 {
+			if p.bulklen == -1 {
+				line, ok, err := p.readLine()
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					p.compact()
+					return nil, nil
+				}
+				if len(line) == 0 || line[0] != '$' {
+					c := byte(' ')
+					if len(line) > 0 {
+						c = line[0]
+					}
+					return nil, ProtocolError(fmt.Sprintf("expected '$', got '%c'", c))
+				}
+				n, perr := parseLen(line[1:])
+				if perr != nil || n < 0 || n > MaxBulkSize {
+					return nil, ProtocolError("invalid bulk length")
+				}
+				p.bulklen = n
+			}
+			// Need the full payload plus its trailing CRLF.
+			if p.Buffered() < p.bulklen+2 {
+				p.compact()
+				return nil, nil
+			}
+			if p.buf[p.pos+p.bulklen] != '\r' || p.buf[p.pos+p.bulklen+1] != '\n' {
+				return nil, ProtocolError("invalid bulk data termination")
+			}
+			arg := make([]byte, p.bulklen)
+			copy(arg, p.buf[p.pos:p.pos+p.bulklen])
+			p.pos += p.bulklen + 2
+			p.bulklen = -1
+			p.args = append(p.args, arg)
+			p.multibulklen--
+		}
+
+		args := p.args
+		p.args = nil
+		p.compact()
+		return args, nil
+	}
+}
+
+// readLine returns the next CRLF/LF-terminated line (without terminator).
+// ok=false means the line is not complete yet. Enforces MaxInlineSize on
+// unterminated input so a malicious client can't grow the buffer unboundedly
+// while we wait for a header line.
