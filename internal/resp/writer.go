@@ -50,3 +50,20 @@ func AppendBulkString(b []byte, s string) []byte {
 // AppendBulkInt64 appends v formatted as a bulk string ("$3\r\n100\r\n").
 // Used to render int-encoded objects on the read path without materializing
 // a byte-slice object; tmp lives on the stack.
+func AppendBulkInt64(b []byte, v int64) []byte {
+	var tmp [20]byte // fits MinInt64
+	s := strconv.AppendInt(tmp[:0], v, 10)
+	return AppendBulk(b, s)
+}
+
+// AppendNull appends the RESP2 null bulk string "$-1\r\n".
+func AppendNull(b []byte) []byte {
+	return append(b, '$', '-', '1', '\r', '\n')
+}
+
+// AppendArrayHeader appends "*<n>\r\n"; the n elements follow.
+func AppendArrayHeader(b []byte, n int) []byte {
+	b = append(b, '*')
+	b = strconv.AppendInt(b, int64(n), 10)
+	return append(b, crlf...)
+}
