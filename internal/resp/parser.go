@@ -147,3 +147,50 @@ func (p *Parser) Next() ([][]byte, error) {
 // ok=false means the line is not complete yet. Enforces MaxInlineSize on
 // unterminated input so a malicious client can't grow the buffer unboundedly
 // while we wait for a header line.
+func (p *Parser) readLine() (line []byte, ok bool, err error) {
+	idx := bytes.IndexByte(p.buf[p.pos:], '\n')
+	if idx < 0 {
+		if p.Buffered() > MaxInlineSize {
+			return nil, false, ProtocolError("too big inline request")
+		}
+		return nil, false, nil
+	}
+	line = p.buf[p.pos : p.pos+idx]
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
+	p.pos += idx + 1
+	return line, true, nil
+}
+
+// compact discards consumed bytes so the buffer stays bounded by the size of
+// the in-flight request rather than total traffic.
+func (p *Parser) compact() {
+	if p.pos == 0 {
+		return
+	}
+	n := copy(p.buf, p.buf[p.pos:])
+	p.buf = p.buf[:n]
+	p.pos = 0
+}
+
+// parseLen parses a decimal length field (digits with optional leading '-').
+func parseLen(b []byte) (int, error) {
+	n, err := strconv.Atoi(string(b))
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// splitInline splits an inline command on whitespace. Copies each word so it
+// stays valid after buffer compaction. (Redis additionally honors quoting via
+// sdssplitargs; deferred until it matters.)
+func splitInline(line []byte) [][]byte {
+	fields := bytes.Fields(line)
+	args := make([][]byte, len(fields))
+	for i, f := range fields {
+		args[i] = append([]byte(nil), f...)
+	}
+	return args
+}
