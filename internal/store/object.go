@@ -79,3 +79,45 @@ func (o *Object) IsShared() bool {
 // encoding (tryObjectEncoding): canonical integer of <= 20 chars -> int,
 // short -> embstr, else raw. May retain b for embstr/raw (callers hand over
 // ownership; the RESP parser already returns private copies).
+func TryEncode(b []byte) *Object {
+	if len(b) <= 20 {
+		if v, ok := String2ll(b); ok {
+			return NewInt(v)
+		}
+	}
+	enc := EncRaw
+	if len(b) <= EmbstrCutoff {
+		enc = EncEmbstr
+	}
+	return &Object{Type: TypeString, Encoding: enc, Val: b}
+}
+
+// TypeName is the TYPE command's word for this object.
+func (o *Object) TypeName() string {
+	switch o.Type {
+	case TypeString:
+		return "string"
+	default:
+		return "unknown"
+	}
+}
+
+// EncodingName is the OBJECT ENCODING word (strEncoding in object.c).
+func (o *Object) EncodingName() string {
+	switch o.Encoding {
+	case EncRaw:
+		return "raw"
+	case EncInt:
+		return "int"
+	case EncEmbstr:
+		return "embstr"
+	default:
+		return "unknown"
+	}
+}
+
+// String2ll is an exact port of string2ll (util.c): parse b as a base-10
+// int64 accepting ONLY the canonical form — no leading zeros ("007" fails,
+// bare "0" passes), no '+', no whitespace, no trailing bytes, at most 20
+// chars, overflow checked at every digit. The strictness is what guarantees
+// int-encoded values round-trip to the identical byte string.
