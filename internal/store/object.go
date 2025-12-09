@@ -121,3 +121,58 @@ func (o *Object) EncodingName() string {
 // bare "0" passes), no '+', no whitespace, no trailing bytes, at most 20
 // chars, overflow checked at every digit. The strictness is what guarantees
 // int-encoded values round-trip to the identical byte string.
+func String2ll(b []byte) (int64, bool) {
+	slen := len(b)
+	// Redis: reject empty and anything >= LONG_STR_SIZE (21) chars.
+	if slen == 0 || slen >= 21 {
+		return 0, false
+	}
+	i := 0
+	negative := false
+
+	// Special case: the single character "0".
+	if slen == 1 && b[0] == '0' {
+		return 0, true
+	}
+	if b[0] == '-' {
+		negative = true
+		i++
+		if i == slen {
+			return 0, false // just "-"
+		}
+	}
+	// First digit must be 1-9; anything else (including '0' and '+') fails.
+	if b[i] < '1' || b[i] > '9' {
+		return 0, false
+	}
+	var v uint64
+	for ; i < slen; i++ {
+		if b[i] < '0' || b[i] > '9' {
+			return 0, false
+		}
+		if v > math.MaxUint64/10 {
+			return 0, false // would overflow on *10
+		}
+		v *= 10
+		d := uint64(b[i] - '0')
+		if v > math.MaxUint64-d {
+			return 0, false // would overflow on +digit
+		}
+		v += d
+	}
+	if negative {
+		// |MinInt64| = MaxInt64 + 1; handle it explicitly since -int64(v)
+		// would overflow for that one magnitude.
+		if v > uint64(math.MaxInt64)+1 {
+			return 0, false
+		}
+		if v == uint64(math.MaxInt64)+1 {
+			return math.MinInt64, true
+		}
+		return -int64(v), true
+	}
+	if v > uint64(math.MaxInt64) {
+		return 0, false
+	}
+	return int64(v), true
+}
