@@ -93,3 +93,52 @@ func TestTryEncode(t *testing.T) {
 	}
 }
 
+func encName(e Encoding) string { return (&Object{Encoding: e}).EncodingName() }
+
+func TestSharedIntegerSingletons(t *testing.T) {
+	// Same value in shared range => same pointer, from both constructors.
+	if NewInt(5) != NewInt(5) {
+		t.Error("NewInt(5) not a singleton")
+	}
+	if TryEncode([]byte("5")) != NewInt(5) {
+		t.Error("TryEncode(\"5\") did not return the shared singleton")
+	}
+	if NewInt(0) != &sharedIntegers[0] || NewInt(9999) != &sharedIntegers[9999] {
+		t.Error("shared range boundaries broken")
+	}
+
+	// Outside the shared range: fresh objects.
+	if NewInt(10000) == NewInt(10000) {
+		t.Error("NewInt(10000) unexpectedly shared")
+	}
+	if NewInt(-1).IsShared() {
+		t.Error("negative int reported shared")
+	}
+
+	// IsShared discriminates singleton vs equal-valued fresh object.
+	if !NewInt(100).IsShared() {
+		t.Error("singleton not detected as shared")
+	}
+	fresh := &Object{Type: TypeString, Encoding: EncInt, Val: int64(100)}
+	if fresh.IsShared() {
+		t.Error("fresh object with shared-range value misreported as shared")
+	}
+	if (&Object{Type: TypeString, Encoding: EncEmbstr, Val: []byte("100")}).IsShared() {
+		t.Error("embstr misreported as shared")
+	}
+}
+
+func TestNames(t *testing.T) {
+	if got := TryEncode([]byte("1")).EncodingName(); got != "int" {
+		t.Errorf("int encoding name = %q", got)
+	}
+	if got := TryEncode([]byte("hi")).EncodingName(); got != "embstr" {
+		t.Errorf("embstr encoding name = %q", got)
+	}
+	if got := TryEncode([]byte(strings.Repeat("x", 45))).EncodingName(); got != "raw" {
+		t.Errorf("raw encoding name = %q", got)
+	}
+	if got := TryEncode([]byte("hi")).TypeName(); got != "string" {
+		t.Errorf("type name = %q", got)
+	}
+}
