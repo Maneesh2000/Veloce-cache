@@ -85,3 +85,17 @@ func TestMatch(t *testing.T) {
 // TestMatchAdversarialPattern: the classic glob blowup a*a*a*...b against
 // aaaa...a must terminate quickly via the nesting guard, not hang the event
 // loop for minutes.
+func TestMatchAdversarialPattern(t *testing.T) {
+	pattern := []byte(strings.Repeat("a*", 30) + "b")
+	subject := []byte(strings.Repeat("a", 200))
+	done := make(chan bool, 1)
+	go func() { done <- Match(pattern, subject) }()
+	select {
+	case got := <-done:
+		if got {
+			t.Error("adversarial pattern unexpectedly matched")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Match did not terminate within 5s on adversarial pattern")
+	}
+}
