@@ -174,3 +174,111 @@ func (s *Server) drainWakePipe() {
 }
 
 // acceptClients accepts until EAGAIN (the analog of acceptTcpHandler).
+func (s *Server) acceptClients() {
+	for i := 0; i < maxAcceptsPerCall; i++ {
+		fd, sa, err := unix.Accept(s.listenFd)
+		if err != nil {
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.ECONNABORTED {
+				return
+			}
+			// EMFILE etc.: count it, log, and back off until next event.
+			s.stats.RejectedConnections++
+			s.logf("accept error: %v", err)
+			return
+		}
+		unix.SetNonblock(fd, true)
+		unix.CloseOnExec(fd)
+		// Redis enables TCP_NODELAY on every client socket.
+		unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
+
+		c := &client{fd: fd, addr: sockaddrString(sa), parser: resp.NewParser()}
+		if err := s.poller.Add(fd, true, false); err != nil {
+			s.stats.RejectedConnections++
+			unix.Close(fd)
+			continue
+		}
+		s.clients[fd] = c
+		s.stats.TotalConnectionsReceived++
+		s.stats.ConnectedClients++
+	}
+}
+
+// handleReadable is readQueryFromClient: read one chunk, then drain every
+// complete command out of the parser (which is what makes pipelining free),
+// then attempt to flush the accumulated replies.
+func (s *Server) handleReadable(c *client) {
+	var buf [readChunk]byte
+	n, err := unix.Read(c.fd, buf[:])
+	switch {
+	case err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.EINTR:
+		return
+	case err != nil:
+		s.closeClient(c) // connection reset etc.
+		return
+	case n == 0:
+		s.closeClient(c) // orderly EOF
+		return
+	}
+	s.stats.TotalNetInputBytes += uint64(n)
+	c.parser.Feed(buf[:n])
+
+	// processInputBuffer: consume every complete pipelined command.
+	for {
+		args, perr := c.parser.Next()
+		if perr != nil {
+			s.stats.ProtocolErrors++
+			c.out = resp.AppendError(c.out, "ERR "+perr.Error())
+			c.closeAfterReply = true
+			break
+		}
+		if args == nil {
+			break // need more bytes
+		}
+		s.dispatch(c, args)
+		if c.closeAfterReply {
+			break // QUIT: stop consuming further pipelined input
+		}
+	}
+	s.flushOutput(c)
+}
+
+// flushOutput is writeToClient + the EPOLLOUT protocol:
+//   - write as much as the kernel accepts;
+//   - on partial write / EAGAIN, arm write interest and finish later;
+//   - once drained, disarm write interest and honor closeAfterReply.
+func (s *Server) flushOutput(c *client) {
+	for len(c.out) > 0 {
+		n, err := unix.Write(c.fd, c.out)
+		if n > 0 {
+			s.stats.TotalNetOutputBytes += uint64(n)
+			c.out = c.out[n:]
+		}
+		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			// Kernel buffer full: register for writability and resume there.
+			if !c.wantWrite {
+				c.wantWrite = true
+				s.poller.Modify(c.fd, true, true)
+			}
+			return
+		}
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			s.closeClient(c) // EPIPE, ECONNRESET, ...
+			return
+		}
+		// err == nil with a partial write: loop; the next Write either
+		// makes progress or returns EAGAIN and we arm write interest.
+	}
+	// Fully drained.
+	c.out = nil
+	if c.wantWrite {
+		c.wantWrite = false
+		s.poller.Modify(c.fd, true, false)
+	}
+	if c.closeAfterReply {
+		s.closeClient(c)
+	}
+}
+
