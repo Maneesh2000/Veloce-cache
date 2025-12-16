@@ -120,3 +120,57 @@ func (s *Server) Stats() Stats {
 }
 
 // Serve runs the event loop until Stop is called. This is aeMain.
+func (s *Server) Serve() error {
+	defer s.closeAll()
+	events := make([]reactor.Event, 128)
+	for !s.stopping {
+		n, err := s.poller.Wait(events, -1)
+		if err != nil {
+			return fmt.Errorf("poller wait: %w", err)
+		}
+		for i := 0; i < n; i++ {
+			ev := events[i]
+			switch ev.Fd {
+			case s.listenFd:
+				s.acceptClients()
+			case s.wakeR:
+				s.drainWakePipe()
+			default:
+				// The client may have been closed earlier in this same
+				// batch (e.g. read error), so look it up fresh.
+				c, ok := s.clients[ev.Fd]
+				if !ok {
+					continue
+				}
+				if ev.Readable {
+					s.handleReadable(c)
+				}
+				// Re-check liveness: the read may have closed it.
+				if c, ok = s.clients[ev.Fd]; ok && ev.Writable {
+					s.flushOutput(c)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Stop wakes the event loop and makes Serve return. Safe to call from any
+// goroutine; idempotent enough for test teardown.
+func (s *Server) Stop() {
+	// A single byte on the self-pipe is the wakeup; the loop sets stopping.
+	unix.Write(s.wakeW, []byte{1})
+}
+
+func (s *Server) drainWakePipe() {
+	var buf [64]byte
+	for {
+		n, err := unix.Read(s.wakeR, buf[:])
+		if n <= 0 || err != nil {
+			break
+		}
+	}
+	s.stopping = true
+}
+
+// acceptClients accepts until EAGAIN (the analog of acceptTcpHandler).
