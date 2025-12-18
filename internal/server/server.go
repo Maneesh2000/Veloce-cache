@@ -317,3 +317,52 @@ func (s *Server) logf(format string, v ...any) {
 
 // listenTCP creates the non-blocking listener: socket -> SO_REUSEADDR ->
 // bind -> listen(511) -> O_NONBLOCK (anet.c's anetTcpServer distilled).
+func listenTCP(host string, port int) (fd int, addr string, err error) {
+	ip := net.IPv4(127, 0, 0, 1)
+	if host != "" {
+		if ip = net.ParseIP(host); ip == nil {
+			return -1, "", fmt.Errorf("invalid bind address %q", host)
+		}
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return -1, "", errors.New("only IPv4 bind addresses are supported in phase 1")
+	}
+
+	fd, err = unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+	if err != nil {
+		return -1, "", err
+	}
+	closeOnErr := func(e error) (int, string, error) { unix.Close(fd); return -1, "", e }
+
+	if err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		return closeOnErr(err)
+	}
+	sa := &unix.SockaddrInet4{Port: port}
+	copy(sa.Addr[:], ip4)
+	if err = unix.Bind(fd, sa); err != nil {
+		return closeOnErr(err)
+	}
+	if err = unix.Listen(fd, tcpBacklog); err != nil {
+		return closeOnErr(err)
+	}
+	if err = unix.SetNonblock(fd, true); err != nil {
+		return closeOnErr(err)
+	}
+	unix.CloseOnExec(fd)
+
+	// Resolve the actual port (meaningful when port 0 was requested).
+	bound, err := unix.Getsockname(fd)
+	if err != nil {
+		return closeOnErr(err)
+	}
+	return fd, sockaddrString(bound), nil
+}
+
+func sockaddrString(sa unix.Sockaddr) string {
+	if sa4, ok := sa.(*unix.SockaddrInet4); ok {
+		return fmt.Sprintf("%d.%d.%d.%d:%d",
+			sa4.Addr[0], sa4.Addr[1], sa4.Addr[2], sa4.Addr[3], sa4.Port)
+	}
+	return "?"
+}
