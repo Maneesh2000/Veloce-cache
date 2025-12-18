@@ -282,3 +282,38 @@ func (s *Server) flushOutput(c *client) {
 	}
 }
 
+func (s *Server) closeClient(c *client) {
+	if _, ok := s.clients[c.fd]; !ok {
+		return
+	}
+	delete(s.clients, c.fd)
+	s.stats.ConnectedClients--
+	s.poller.Remove(c.fd)
+	unix.Close(c.fd)
+}
+
+func (s *Server) closeAll() {
+	for _, c := range s.clients {
+		s.closeClient(c)
+	}
+	if s.listenFd >= 0 {
+		s.poller.Remove(s.listenFd)
+		unix.Close(s.listenFd)
+		s.listenFd = -1
+	}
+	if s.wakeR >= 0 {
+		unix.Close(s.wakeR)
+		unix.Close(s.wakeW)
+		s.wakeR, s.wakeW = -1, -1
+	}
+	s.poller.Close()
+}
+
+func (s *Server) logf(format string, v ...any) {
+	if s.Logger != nil {
+		s.Logger.Printf(format, v...)
+	}
+}
+
+// listenTCP creates the non-blocking listener: socket -> SO_REUSEADDR ->
+// bind -> listen(511) -> O_NONBLOCK (anet.c's anetTcpServer distilled).
