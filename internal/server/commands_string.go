@@ -1,0 +1,68 @@
+package server
+
+import (
+	"math"
+
+	"github.com/Maneesh2000/Veloce-cache/internal/resp"
+	"github.com/Maneesh2000/Veloce-cache/internal/store"
+)
+
+// String commands — the t_string.c analog.
+
+const (
+	wrongTypeErr    = "WRONGTYPE Operation against a key holding the wrong kind of value"
+	notAnIntegerErr = "ERR value is not an integer or out of range"
+	incrOverflowErr = "ERR increment or decrement would overflow"
+)
+
+// addReplyBulkObj renders a string object as a bulk reply. Int-encoded
+// values are formatted straight into the output buffer — no intermediate
+// object, mirroring how Redis serves shared integers without allocation.
+func addReplyBulkObj(c *client, o *store.Object) {
+	if o.Encoding == store.EncInt {
+		c.out = resp.AppendBulkInt64(c.out, o.Val.(int64))
+	} else {
+		c.out = resp.AppendBulk(c.out, o.Val.([]byte))
+	}
+}
+
+// checkTypeString replies WRONGTYPE and returns false unless o is a string.
+// (Unreachable until Phase 4 introduces other types, but the guard belongs
+// in every string command now — checkType in Redis.)
+func checkTypeString(c *client, o *store.Object) bool {
+	if o.Type != store.TypeString {
+		c.out = resp.AppendError(c.out, wrongTypeErr)
+		return false
+	}
+	return true
+}
+
+// setCommand: plain SET key value (setGenericCommand without options).
+// Options (NX/XX/EX/PX/KEEPTTL/GET) come with later phases; until then any
+// extra argument is a syntax error, like an unknown option in Redis.
+// TODO(ttl): when expiration lands, plain SET must clear an existing TTL.
+func setCommand(s *Server, c *client, args [][]byte) {
+	if len(args) > 3 {
+		c.out = resp.AppendError(c.out, "ERR syntax error")
+		return
+	}
+	s.db.Set(args[1], store.TryEncode(args[2]))
+	c.out = resp.AppendSimpleString(c.out, "OK")
+}
+
+// getCommand: GET key (getGenericCommand).
+func getCommand(s *Server, c *client, args [][]byte) {
+	o := s.db.LookupRead(args[1])
+	if o == nil {
+		c.out = resp.AppendNull(c.out)
+		return
+	}
+	if !checkTypeString(c, o) {
+		return
+	}
+	addReplyBulkObj(c, o)
+}
+
+// getInt64FromObject extracts the integer value of a string object under
+// INCR semantics (getLongLongFromObject): int encoding reads directly,
+// otherwise the payload must be a canonical string2ll integer.
