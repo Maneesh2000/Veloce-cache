@@ -66,3 +66,48 @@ func getCommand(s *Server, c *client, args [][]byte) {
 // getInt64FromObject extracts the integer value of a string object under
 // INCR semantics (getLongLongFromObject): int encoding reads directly,
 // otherwise the payload must be a canonical string2ll integer.
+func getInt64FromObject(o *store.Object) (int64, bool) {
+	if o.Type != store.TypeString {
+		return 0, false
+	}
+	if o.Encoding == store.EncInt {
+		return o.Val.(int64), true
+	}
+	return store.String2ll(o.Val.([]byte))
+}
+
+// incrDecr implements INCR/DECR/INCRBY/DECRBY (incrDecrCommand).
+func incrDecr(s *Server, c *client, key []byte, incr int64) {
+	o := s.db.LookupWrite(key)
+	var oldValue int64
+	if o != nil {
+		if !checkTypeString(c, o) {
+			return
+		}
+		v, ok := getInt64FromObject(o)
+		if !ok {
+			c.out = resp.AppendError(c.out, notAnIntegerErr)
+			return
+		}
+		oldValue = v
+	} // missing key behaves as 0
+
+	// Overflow pre-check, exactly as in incrDecrCommand.
+	if (incr < 0 && oldValue < 0 && incr < math.MinInt64-oldValue) ||
+		(incr > 0 && oldValue > 0 && incr > math.MaxInt64-oldValue) {
+		c.out = resp.AppendError(c.out, incrOverflowErr)
+		return
+	}
+	value := oldValue + incr
+
+	// In-place mutation is allowed only for a private (non-shared)
+	// int-encoded object; otherwise install a new object (which NewInt
+	// serves from the shared table when in range).
+	if o != nil && o.Encoding == store.EncInt && !o.IsShared() {
+		o.Val = value
+	} else {
+		s.db.Set(key, store.NewInt(value))
+	}
+	c.out = resp.AppendInt(c.out, value)
+}
+
