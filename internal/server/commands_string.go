@@ -111,3 +111,34 @@ func incrDecr(s *Server, c *client, key []byte, incr int64) {
 	c.out = resp.AppendInt(c.out, value)
 }
 
+func incrCommand(s *Server, c *client, args [][]byte) {
+	incrDecr(s, c, args[1], 1)
+}
+
+func decrCommand(s *Server, c *client, args [][]byte) {
+	incrDecr(s, c, args[1], -1)
+}
+
+func incrbyCommand(s *Server, c *client, args [][]byte) {
+	incr, ok := store.String2ll(args[2])
+	if !ok {
+		c.out = resp.AppendError(c.out, notAnIntegerErr)
+		return
+	}
+	incrDecr(s, c, args[1], incr)
+}
+
+func decrbyCommand(s *Server, c *client, args [][]byte) {
+	decr, ok := store.String2ll(args[2])
+	if !ok {
+		c.out = resp.AppendError(c.out, notAnIntegerErr)
+		return
+	}
+	// Negating MinInt64 overflows; Redis rejects it up front with a
+	// dedicated message (decrbyCommand, t_string.c).
+	if decr == math.MinInt64 {
+		c.out = resp.AppendError(c.out, "ERR decrement would overflow")
+		return
+	}
+	incrDecr(s, c, args[1], -decr)
+}
