@@ -25,6 +25,18 @@ var commandTable = map[string]*command{
 	"QUIT":    {name: "quit", arity: 1, handler: quitCommand},
 	"COMMAND": {name: "command", arity: -1, handler: commandCommand},
 
+	// Phase 2 — the key-value core. Arities match commands.def.
+	"SET":    {name: "set", arity: -3, handler: setCommand},
+	"GET":    {name: "get", arity: 2, handler: getCommand},
+	"DEL":    {name: "del", arity: -2, handler: delCommand},
+	"EXISTS": {name: "exists", arity: -2, handler: existsCommand},
+	"KEYS":   {name: "keys", arity: 2, handler: keysCommand},
+	"TYPE":   {name: "type", arity: 2, handler: typeCommand},
+	"OBJECT": {name: "object", arity: -2, handler: objectCommand},
+	"INCR":   {name: "incr", arity: 2, handler: incrCommand},
+	"DECR":   {name: "decr", arity: 2, handler: decrCommand},
+	"INCRBY": {name: "incrby", arity: 3, handler: incrbyCommand},
+	"DECRBY": {name: "decrby", arity: 3, handler: decrbyCommand},
 }
 
 // dispatch is the analog of processCommand + call in server.c: look up the
