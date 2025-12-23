@@ -43,3 +43,36 @@ func keysCommand(s *Server, c *client, args [][]byte) {
 }
 
 // typeCommand: TYPE key -> simple string "string" | "none".
+func typeCommand(s *Server, c *client, args [][]byte) {
+	o := s.db.LookupRead(args[1])
+	if o == nil {
+		c.out = resp.AppendSimpleString(c.out, "none")
+		return
+	}
+	c.out = resp.AppendSimpleString(c.out, o.TypeName())
+}
+
+// objectCommand: OBJECT <subcommand> — container command. Phase 2 supports
+// ENCODING (and HELP-adjacent error text). Note Redis replies nil, NOT an
+// error, for a missing key here.
+func objectCommand(s *Server, c *client, args [][]byte) {
+	sub := strings.ToUpper(string(args[1]))
+	switch sub {
+	case "ENCODING":
+		if len(args) != 3 {
+			c.out = resp.AppendError(c.out,
+				"ERR wrong number of arguments for 'object|encoding' command")
+			return
+		}
+		o := s.db.LookupRead(args[2])
+		if o == nil {
+			c.out = resp.AppendNull(c.out)
+			return
+		}
+		c.out = resp.AppendBulkString(c.out, o.EncodingName())
+	default:
+		// commandCheckExistence (server.c) format for container commands.
+		c.out = resp.AppendError(c.out, fmt.Sprintf(
+			"ERR unknown subcommand '%.128s'. Try OBJECT HELP.", args[1]))
+	}
+}
