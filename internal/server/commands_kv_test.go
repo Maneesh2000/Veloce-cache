@@ -252,3 +252,109 @@ func TestDelAndExists(t *testing.T) {
 	mustReply(t, br, "1") // only c remains
 }
 
+func TestTypeCommand(t *testing.T) {
+	srv, _ := startServer(t)
+	conn := dial(t, srv)
+	br := bufio.NewReader(conn)
+
+	conn.Write(cmd("SET", "s", "v"))
+	mustReply(t, br, "OK")
+	conn.Write(cmd("TYPE", "s"))
+	mustReply(t, br, "string")
+	conn.Write(cmd("TYPE", "missing"))
+	mustReply(t, br, "none")
+	// Int-encoded values are still TYPE string.
+	conn.Write(cmd("SET", "n", "42"))
+	mustReply(t, br, "OK")
+	conn.Write(cmd("TYPE", "n"))
+	mustReply(t, br, "string")
+}
+
+func TestKeysGlob(t *testing.T) {
+	srv, _ := startServer(t)
+	conn := dial(t, srv)
+	br := bufio.NewReader(conn)
+
+	for _, k := range []string{"user:1", "user:2", "user:30", "session:1", "hello", "hallo"} {
+		conn.Write(cmd("SET", k, "v"))
+		mustReply(t, br, "OK")
+	}
+
+	keysSorted := func(pattern string) []string {
+		t.Helper()
+		conn.Write(cmd("KEYS", pattern))
+		got, err := readReply(br)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inner := strings.Trim(got, "[]")
+		if inner == "" {
+			return nil
+		}
+		keys := strings.Split(inner, " ")
+		sort.Strings(keys) // map iteration order is random
+		return keys
+	}
+
+	if g := keysSorted("*"); len(g) != 6 {
+		t.Fatalf("KEYS * = %v", g)
+	}
+	if g := keysSorted("user:*"); fmt.Sprint(g) != "[user:1 user:2 user:30]" {
+		t.Fatalf("KEYS user:* = %v", g)
+	}
+	if g := keysSorted("user:?"); fmt.Sprint(g) != "[user:1 user:2]" {
+		t.Fatalf("KEYS user:? = %v", g)
+	}
+	if g := keysSorted("h[ae]llo"); fmt.Sprint(g) != "[hallo hello]" {
+		t.Fatalf("KEYS h[ae]llo = %v", g)
+	}
+	if g := keysSorted("h[^e]llo"); fmt.Sprint(g) != "[hallo]" {
+		t.Fatalf("KEYS h[^e]llo = %v", g)
+	}
+	if g := keysSorted("nomatch*"); g != nil {
+		t.Fatalf("KEYS nomatch* = %v", g)
+	}
+}
+
+// TestPipelinedWriteSequence pins ordering of mutating commands in one
+// batched write — replies must reflect strictly serial execution.
+func TestPipelinedWriteSequence(t *testing.T) {
+	srv, _ := startServer(t)
+	conn := dial(t, srv)
+	br := bufio.NewReader(conn)
+
+	var batch []byte
+	batch = append(batch, cmd("SET", "k", "1")...)
+	batch = append(batch, cmd("INCR", "k")...)
+	batch = append(batch, cmd("GET", "k")...)
+	batch = append(batch, cmd("DEL", "k")...)
+	batch = append(batch, cmd("GET", "k")...)
+	conn.Write(batch)
+
+	for _, want := range []string{"OK", "2", "2", "1", "(nil)"} {
+		mustReply(t, br, want)
+	}
+}
+
+func TestKeyspaceHitMissStats(t *testing.T) {
+	srv, stop := startServer(t)
+	conn := dial(t, srv)
+	br := bufio.NewReader(conn)
+
+	conn.Write(cmd("SET", "k", "v"))
+	mustReply(t, br, "OK")
+	conn.Write(cmd("GET", "k")) // hit
+	mustReply(t, br, "v")
+	conn.Write(cmd("GET", "missing")) // miss
+	mustReply(t, br, "(nil)")
+	conn.Write(cmd("EXISTS", "k", "missing")) // hit + miss
+	mustReply(t, br, "1")
+	conn.Write(cmd("INCR", "n")) // write path: must NOT count
+	mustReply(t, br, "1")
+
+	stop() // stats are loop-owned; halt before reading
+	st := srv.Stats()
+	if st.KeyspaceHits != 2 || st.KeyspaceMisses != 2 {
+		t.Fatalf("hits=%d misses=%d, want 2/2", st.KeyspaceHits, st.KeyspaceMisses)
+	}
+}
