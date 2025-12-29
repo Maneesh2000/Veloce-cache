@@ -43,3 +43,47 @@ the event loop).
 - [x] Pipelining — falls out of the parser loop, verified by test and
       `redis-benchmark -P 16`
 
+## Layout
+
+| Path | Contents | C counterpart |
+|------|----------|---------------|
+| `internal/reactor` | `Poller` interface, kqueue + epoll backends | `ae.c`, `ae_kqueue.c`, `ae_epoll.c` |
+| `internal/resp` | resumable request parser, reply serializer | `networking.c` (processMultibulkBuffer / addReply*) |
+| `internal/store` | object model, keyspace, string2ll, glob matcher | `object.c`, `db.c`, `util.c` |
+| `internal/server` | event loop, accept, buffers, dispatch, stats | `server.c` + `networking.c` |
+| `internal/server/commands_string.go` | GET/SET/INCR family | `t_string.c` |
+| `internal/server/commands_keyspace.go` | DEL/EXISTS/KEYS/TYPE/OBJECT | `db.c`, `object.c` |
+| `cmd/veloce` | binary entry point | `main()` in server.c |
+
+## Run
+
+```sh
+go run ./cmd/veloce            # listens on 127.0.0.1:6379
+go run ./cmd/veloce -port 7000 -bind 0.0.0.0
+```
+
+Talk to it with the real tooling (built from ../redis with `make redis-cli redis-benchmark`):
+
+```sh
+redis-cli -p 6379 PING                     # PONG
+redis-cli -p 6379 ECHO hello               # "hello"
+redis-benchmark -p 6379 -t ping -P 16 -q   # pipelined throughput
+```
+
+## Test
+
+```sh
+go test -race ./...                       # unit + integration (real TCP)
+go test -bench=. ./internal/resp/         # parser throughput
+GOOS=linux go build ./...                 # verify the epoll backend compiles
+```
+
+The two tests that guard the phase-1 trip hazards:
+
+- `TestResumableEveryByteBoundary` / `TestDribbledCommand` — a command must
+  parse identically no matter where the byte stream is cut (parser level and
+  full server level).
+- `TestLargeReplyExercisesWritePath` — a 4MB reply overflows the kernel
+  socket buffer, forcing the partial-write → arm-write-interest → resume →
+  disarm cycle.
+
