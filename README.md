@@ -87,3 +87,37 @@ The two tests that guard the phase-1 trip hazards:
   socket buffer, forcing the partial-write → arm-write-interest → resume →
   disarm cycle.
 
+## Design invariants (keep these while adding phases)
+
+- **One goroutine owns everything.** Only the event-loop goroutine touches
+  server, client, and (from Phase 2) keyspace state. No mutexes, no atomics.
+  Anything read from other goroutines (tests read `Stats()`) must happen
+  after the loop has stopped, or move to a message over the wake pipe.
+- **Level-triggered polling, one 16KB read per readiness event** — keeps the
+  loop fair across clients (Redis PROTO_IOBUF_LEN).
+- **Protocol errors are fatal per connection**: reply with the error, flush,
+  close — parser state is not recoverable, same as Redis.
+
+## Oracle testing
+
+The strongest verification: run the real thing next to veloce and diff.
+
+```sh
+(cd ../redis && make redis-server redis-cli -j8)
+../redis/src/redis-server --port 16380 --save '' &
+go run ./cmd/veloce -port 16381 &
+../redis/src/redis-cli --no-raw -p 16380 < oracle_script.txt > real.txt
+../redis/src/redis-cli --no-raw -p 16381 < oracle_script.txt > mine.txt
+diff real.txt mine.txt   # phase 2: byte-identical on 53 commands
+```
+
+Caveat: avoid multi-result KEYS in oracle scripts (hash-iteration order is
+random on both sides); use single-match patterns.
+
+## Next: Phase 3 — serverCron & expiration
+
+Time events on the reactor (the loop currently blocks forever in Wait — it
+will need a timeout), lazy + active expiry, EXPIRE/TTL/PERSIST/SET-EX, and
+the `TODO(ttl)` marker in `store.DB.Set` (plain SET clears TTL). Reference:
+`../redis/src/expire.c` (activeExpireCycle, expireIfNeeded), `server.c`
+(serverCron).
