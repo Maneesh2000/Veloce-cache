@@ -14,7 +14,7 @@ Because veloce implements the real protocol, the real `redis-cli`,
 
 ---
 
-## 1. The protocol in 60 seconds
+## 1. The protocol
 
 RESP2 is a text-framed protocol. Every message starts with **one type byte**,
 and every line ends with **CRLF** (`\r\n`):
@@ -175,12 +175,62 @@ Read 2: "lo\r\n"
     → return [["ECHO"],["hello"]]      ✓ identical to the unsplit case
 ```
 
-### Pipelining falls out for free
+### Pipelining
 
-If one read contains three commands, the server just calls `Next()` in a loop
-until it returns `(nil, nil)` — each call peels off one command. No extra
-machinery; this is why `redis-benchmark -P 16` (16 commands per packet) works
-and why replies come back strictly in order.
+**What pipelining is:** normally a client works request-by-request — send
+`SET`, wait for `+OK`, send `GET`, wait for the value. Every command pays one
+network round trip (RTT). A *pipelining* client instead writes **many
+commands back-to-back without waiting for any reply**, then reads all the
+replies in one go. For N commands that's ~1 round trip instead of N — on a
+1ms network link, 100 sequential commands cost ~100ms, pipelined ~1ms.
+
+```
+ without pipelining (3 RTTs):          with pipelining (1 RTT):
+ client            server              client            server
+   │── SET k 1 ──────▶│                  │── SET k 1 ─┐
+   │◀───── +OK ───────│                  │── INCR k ──┼─────▶│  one write,
+   │── INCR k ────────▶│                 │── GET k ───┘      │  one packet
+   │◀───── :2 ────────│                  │                   │
+   │── GET k ─────────▶│                 │◀─ +OK  :2  $1 2 ──│  one read,
+   │◀───── $1 2 ──────│                  │                   │  all replies
+```
+
+**How this package handles it:** one `unix.Read` may therefore deliver several
+complete commands in a single buffer, e.g.:
+
+```
+*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\n1\r\n*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n*2\r\n$3\r\nGET\r\n$1\r\nk\r\n
+└──────────── SET k 1 ─────────────┘└──────── INCR k ────────┘└─────── GET k ───────┘
+```
+
+After one `Feed`, the server calls `Next()` in a loop. Each call consumes
+exactly one command from the buffer and returns it; the loop stops when
+`Next()` returns `(nil, nil)` — meaning "no complete command left":
+
+```
+Feed(the 3-command buffer)
+  Next() → ["SET","k","1"]     dispatch → c.out = "+OK\r\n"
+  Next() → ["INCR","k"]        dispatch → c.out = "+OK\r\n:2\r\n"
+  Next() → ["GET","k"]         dispatch → c.out = "+OK\r\n:2\r\n$1\r\n2\r\n"
+  Next() → (nil, nil)          stop; flush c.out with one write
+```
+
+Two properties matter and both come free from the design:
+
+- **Order is preserved.** Commands are decoded, executed, and their replies
+  appended to `c.out` strictly in arrival order on a single thread — so the
+  client can match reply #i to command #i with no IDs or correlation.
+- **Replies coalesce.** Because serializers append to `c.out` and the socket
+  is flushed once after the drain loop, the three replies above leave in one
+  packet — the mirror image of the request batching.
+
+A half command at the end of the batch is fine too: `Next()` returns the two
+complete ones, keeps the fragment's progress, and resumes when the rest
+arrives — pipelining and resumability are the same mechanism.
+
+No pipelining-specific code exists anywhere; the `Next()`-until-nil loop in
+`handleReadable` is all of it. This is why `redis-benchmark -P 16`
+(16 commands per packet) hits ~2-3M ops/sec against veloce.
 
 ### The inline protocol
 
